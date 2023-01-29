@@ -1,10 +1,11 @@
+use anyhow::{Context, Error, Result};
 use futures_util::StreamExt;
 use songbird::{
     input::{Input, Restartable},
     tracks::{PlayMode, TrackHandle},
     Songbird,
 };
-use std::{collections::HashMap, env, error::Error, future::Future, sync::Arc};
+use std::{collections::HashMap, env, future::Future, sync::Arc};
 use tokio::sync::{mpsc, RwLock};
 use twilight_gateway::{Cluster, Event, Intents};
 use twilight_http::Client as HttpClient;
@@ -22,10 +23,7 @@ pub struct StateRef {
     songbird: Songbird,
 }
 
-fn spawn(
-    fut: impl Future<Output = Result<(), Box<dyn Error + Send + Sync + 'static>>> + Send + 'static,
-    shutdown: mpsc::Sender<Box<dyn Error + Send + Sync + 'static>>,
-) {
+fn spawn(fut: impl Future<Output = Result<()>> + Send + 'static, shutdown: mpsc::Sender<Error>) {
     tokio::spawn(async move {
         if let Err(why) = fut.await {
             let _ = shutdown.send(why).await;
@@ -34,7 +32,7 @@ fn spawn(
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+async fn main() -> Result<(), Error> {
     // Initialize the tracing subscriber.
     tracing_subscriber::fmt::init();
 
@@ -77,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     Ok(())
 }
 
-async fn join(state: State) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+async fn join(state: State) -> Result<(), Error> {
     let (_handle, status) = state
         .songbird
         .join(532298747284291584, 743945715683819661)
@@ -87,13 +85,10 @@ async fn join(state: State) -> Result<(), Box<dyn Error + Send + Sync + 'static>
         tracing::info!("Successfully connected to discord channel");
     }
 
-    status.map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync + 'static>)
+    status.context("Failed to join channel")
 }
 
-pub async fn leave(
-    msg: Message,
-    state: State,
-) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+pub async fn leave(msg: Message, state: State) -> Result<()> {
     tracing::debug!(
         "leave command in channel {} by {}",
         msg.channel_id,
@@ -114,10 +109,7 @@ pub async fn leave(
     Ok(())
 }
 
-pub async fn play(
-    msg: Message,
-    state: State,
-) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+pub async fn play(msg: Message, state: State) -> Result<()> {
     tracing::debug!(
         "play command in channel {} by {}",
         msg.channel_id,
@@ -183,10 +175,7 @@ pub async fn play(
     Ok(())
 }
 
-pub async fn pause(
-    msg: Message,
-    state: State,
-) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+pub async fn pause(msg: Message, state: State) -> Result<()> {
     tracing::debug!(
         "pause command in channel {} by {}",
         msg.channel_id,
@@ -228,10 +217,7 @@ pub async fn pause(
     Ok(())
 }
 
-pub async fn stop(
-    msg: Message,
-    state: State,
-) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+pub async fn stop(msg: Message, state: State) -> Result<()> {
     tracing::debug!(
         "stop command in channel {} by {}",
         msg.channel_id,
