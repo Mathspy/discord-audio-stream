@@ -5,7 +5,7 @@ use songbird::{
     Songbird,
 };
 use std::{collections::HashMap, env, error::Error, future::Future, sync::Arc};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use twilight_gateway::{Cluster, Event, Intents};
 use twilight_http::Client as HttpClient;
 use twilight_model::{
@@ -24,10 +24,11 @@ pub struct StateRef {
 
 fn spawn(
     fut: impl Future<Output = Result<(), Box<dyn Error + Send + Sync + 'static>>> + Send + 'static,
+    shutdown: mpsc::Sender<Box<dyn Error + Send + Sync + 'static>>,
 ) {
     tokio::spawn(async move {
         if let Err(why) = fut.await {
-            tracing::debug!("handler error: {:?}", why);
+            let _ = shutdown.send(why).await;
         }
     });
 }
@@ -59,11 +60,17 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         )
     };
 
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+
     while let Some((_, event)) = events.next().await {
+        if let Ok(error) = shutdown_rx.try_recv() {
+            return Err(error);
+        }
+
         state.songbird.process(&event).await;
 
         if let Event::Ready(_) = event {
-            spawn(join(Arc::clone(&state)));
+            spawn(join(Arc::clone(&state)), shutdown_tx.clone());
         }
     }
 
@@ -80,7 +87,7 @@ async fn join(state: State) -> Result<(), Box<dyn Error + Send + Sync + 'static>
         tracing::info!("Successfully connected to discord channel");
     }
 
-    Ok(())
+    status.map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync + 'static>)
 }
 
 pub async fn leave(
