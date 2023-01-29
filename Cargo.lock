@@ -446,6 +446,7 @@ name = "discord-audio-stream"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "cpal",
  "futures-util",
  "ringbuf",
