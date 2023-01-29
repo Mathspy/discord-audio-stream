@@ -2,24 +2,19 @@ use anyhow::{Context, Error, Result};
 use futures_util::StreamExt;
 use songbird::{
     input::{Input, Restartable},
-    tracks::{PlayMode, TrackHandle},
     Songbird,
 };
-use std::{collections::HashMap, env, future::Future, sync::Arc};
-use tokio::sync::{mpsc, RwLock};
+use std::{env, future::Future, sync::Arc};
+use tokio::sync::mpsc;
 use twilight_gateway::{Cluster, Event, Intents};
 use twilight_http::Client as HttpClient;
-use twilight_model::{
-    channel::Message,
-    id::{marker::GuildMarker, Id},
-};
+use twilight_model::channel::Message;
 
 type State = Arc<StateRef>;
 
 #[derive(Debug)]
 pub struct StateRef {
     http: HttpClient,
-    trackdata: RwLock<HashMap<Id<GuildMarker>, TrackHandle>>,
     songbird: Songbird,
 }
 
@@ -48,14 +43,7 @@ async fn main() -> Result<(), Error> {
 
         let songbird = Songbird::twilight(Arc::new(cluster), user_id);
 
-        (
-            events,
-            Arc::new(StateRef {
-                http,
-                trackdata: Default::default(),
-                songbird,
-            }),
-        )
+        (events, Arc::new(StateRef { http, songbird }))
     };
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
@@ -158,10 +146,7 @@ pub async fn play(msg: Message, state: State) -> Result<()> {
 
         if let Some(call_lock) = state.songbird.get(guild_id) {
             let mut call = call_lock.lock().await;
-            let handle = call.play_source(input);
-
-            let mut store = state.trackdata.write().await;
-            store.insert(guild_id, handle);
+            let _handle = call.play_source(input);
         }
     } else {
         state
@@ -171,72 +156,6 @@ pub async fn play(msg: Message, state: State) -> Result<()> {
             .exec()
             .await?;
     }
-
-    Ok(())
-}
-
-pub async fn pause(msg: Message, state: State) -> Result<()> {
-    tracing::debug!(
-        "pause command in channel {} by {}",
-        msg.channel_id,
-        msg.author.name
-    );
-
-    let guild_id = msg.guild_id.unwrap();
-
-    let store = state.trackdata.read().await;
-
-    let content = if let Some(handle) = store.get(&guild_id) {
-        let info = handle.get_info().await?;
-
-        let paused = match info.playing {
-            PlayMode::Play => {
-                let _success = handle.pause();
-                false
-            }
-            _ => {
-                let _success = handle.play();
-                true
-            }
-        };
-
-        let action = if paused { "Unpaused" } else { "Paused" };
-
-        format!("{} the track", action)
-    } else {
-        format!("No track to (un)pause!")
-    };
-
-    state
-        .http
-        .create_message(msg.channel_id)
-        .content(&content)?
-        .exec()
-        .await?;
-
-    Ok(())
-}
-
-pub async fn stop(msg: Message, state: State) -> Result<()> {
-    tracing::debug!(
-        "stop command in channel {} by {}",
-        msg.channel_id,
-        msg.author.name
-    );
-
-    let guild_id = msg.guild_id.unwrap();
-
-    if let Some(call_lock) = state.songbird.get(guild_id) {
-        let mut call = call_lock.lock().await;
-        let _ = call.stop();
-    }
-
-    state
-        .http
-        .create_message(msg.channel_id)
-        .content("Stopped the track")?
-        .exec()
-        .await?;
 
     Ok(())
 }
