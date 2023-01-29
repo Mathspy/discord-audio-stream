@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use songbird::{
     input::{Input, Restartable},
     tracks::{PlayMode, TrackHandle},
@@ -5,7 +6,7 @@ use songbird::{
 };
 use std::{collections::HashMap, env, error::Error, future::Future, sync::Arc};
 use tokio::sync::RwLock;
-use twilight_gateway::{Cluster, Intents};
+use twilight_gateway::{Cluster, Event, Intents};
 use twilight_http::Client as HttpClient;
 use twilight_model::{
     channel::Message,
@@ -21,7 +22,7 @@ pub struct StateRef {
     songbird: Songbird,
 }
 
-pub fn spawn(
+fn spawn(
     fut: impl Future<Output = Result<(), Box<dyn Error + Send + Sync + 'static>>> + Send + 'static,
 ) {
     tokio::spawn(async move {
@@ -36,7 +37,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     // Initialize the tracing subscriber.
     tracing_subscriber::fmt::init();
 
-    let (_events, _state) = {
+    let (mut events, state) = {
         let token = env::var("DISCORD_TOKEN")?;
 
         let http = HttpClient::new(token.clone());
@@ -58,52 +59,26 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         )
     };
 
-    // while let Some((_, event)) = events.next().await {
-    //     state.standby.process(&event);
-    //     state.songbird.process(&event).await;
+    while let Some((_, event)) = events.next().await {
+        state.songbird.process(&event).await;
 
-    //     if let Event::MessageCreate(msg) = event {
-    //         if msg.guild_id.is_none() || !msg.content.starts_with('!') {
-    //             continue;
-    //         }
-
-    //         match msg.content.splitn(2, ' ').next() {
-    //             Some("!join") => spawn(join(msg.0, Arc::clone(&state))),
-    //             Some("!leave") => spawn(leave(msg.0, Arc::clone(&state))),
-    //             Some("!pause") => spawn(pause(msg.0, Arc::clone(&state))),
-    //             Some("!play") => spawn(play(msg.0, Arc::clone(&state))),
-    //             Some("!seek") => spawn(seek(msg.0, Arc::clone(&state))),
-    //             Some("!stop") => spawn(stop(msg.0, Arc::clone(&state))),
-    //             Some("!volume") => spawn(volume(msg.0, Arc::clone(&state))),
-    //             _ => continue,
-    //         }
-    //     }
-    // }
+        if let Event::Ready(_) = event {
+            spawn(join(Arc::clone(&state)));
+        }
+    }
 
     Ok(())
 }
 
-pub async fn join(
-    msg: Message,
-    state: State,
-) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
-    let channel_id = msg.content.parse::<u64>()?;
+async fn join(state: State) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+    let (_handle, status) = state
+        .songbird
+        .join(532298747284291584, 743945715683819661)
+        .await;
 
-    let guild_id = msg.guild_id.ok_or("Can't join a non-guild channel.")?;
-
-    let (_handle, success) = state.songbird.join(guild_id, channel_id).await;
-
-    let content = match success {
-        Ok(()) => format!("Joined <#{}>!", channel_id),
-        Err(e) => format!("Failed to join <#{}>! Why: {:?}", channel_id, e),
-    };
-
-    state
-        .http
-        .create_message(msg.channel_id)
-        .content(&content)?
-        .exec()
-        .await?;
+    if status.is_ok() {
+        tracing::info!("Successfully connected to discord channel");
+    }
 
     Ok(())
 }
