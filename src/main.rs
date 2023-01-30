@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use ringbuf::{Consumer, HeapRb};
 use songbird::{
     input::{reader::MediaSource, Input},
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
     // Initialize the tracing subscriber.
     tracing_subscriber::fmt::init();
 
-    let (mut events, songbird) = {
+    let (events, songbird) = {
         let token = env::var("DISCORD_TOKEN")?;
 
         let http = HttpClient::new(token.clone());
@@ -64,25 +64,35 @@ async fn main() -> Result<()> {
 
     let (signal_tx, signal_rx) = broadcast::channel::<Signal>(2);
 
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                signal_tx.send(Signal::Shutdown)?;
-                songbird.leave(532298747284291584).await?;
+    let event_stream = events
+        .then(futures_util::future::ok)
+        .try_for_each_concurrent(None, |(_, event)| async {
+            let songbird = Arc::clone(&songbird);
+            let signal_rx = signal_rx.resubscribe();
 
-                return Ok(());
-            }
-            Some((_, event)) = events.next() => {
+            tokio::spawn(async move {
                 songbird.process(&event).await;
 
                 if let Event::Ready(_) = event {
-                    tokio::spawn(join(Arc::clone(&songbird), signal_rx.resubscribe()))
+                    join(songbird, signal_rx)
                         .await
-                        .context("join task failed unexpectedly")?
                         .context("failed to join channel")?;
                 }
 
-            }
+                Ok(())
+            })
+            .await?
+        });
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            signal_tx.send(Signal::Shutdown)?;
+            songbird.leave(532298747284291584).await?;
+
+            return Ok(());
+        }
+        result = event_stream => {
+            return result;
         }
     }
 }
