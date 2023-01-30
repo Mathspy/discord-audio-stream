@@ -6,8 +6,8 @@ use songbird::{
     input::{reader::MediaSource, Input},
     Songbird,
 };
-use std::{env, future::Future, io, sync::Arc};
-use tokio::sync::{broadcast, mpsc};
+use std::{env, io, sync::Arc};
+use tokio::sync::broadcast;
 use twilight_gateway::{Cluster, Event, Intents};
 use twilight_http::Client as HttpClient;
 
@@ -42,17 +42,6 @@ impl MediaSource for InputStream {
     }
 }
 
-fn spawn(
-    fut: impl Future<Output = Result<()>> + Send + 'static,
-    shutdown: mpsc::Sender<Result<()>>,
-) {
-    tokio::spawn(async move {
-        if let Err(why) = fut.await {
-            let _ = shutdown.send(Err(why)).await;
-        }
-    });
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize the tracing subscriber.
@@ -73,30 +62,13 @@ async fn main() -> Result<()> {
         (events, Arc::new(songbird))
     };
 
-    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(2);
     let (signal_tx, signal_rx) = broadcast::channel::<Signal>(2);
-
-    {
-        let shutdown_tx = shutdown_tx.clone();
-
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.unwrap();
-
-            let _ = shutdown_tx.send(Ok(())).await;
-        });
-    }
 
     loop {
         tokio::select! {
-            signal = shutdown_rx.recv() => {
+            _ = tokio::signal::ctrl_c() => {
                 signal_tx.send(Signal::Shutdown)?;
                 songbird.leave(532298747284291584).await?;
-
-                match signal {
-                    Some(Ok(_)) => tracing::info!("Received SIGINT, shutting down..."),
-                    Some(Err(error)) => tracing::error!("Fatal error, shutting down... \n{error:?}"),
-                    None => tracing::error!("Sending end of shutdown channel unexpectedly closed"),
-                }
 
                 return Ok(());
             }
@@ -104,8 +76,12 @@ async fn main() -> Result<()> {
                 songbird.process(&event).await;
 
                 if let Event::Ready(_) = event {
-                    spawn(join(Arc::clone(&songbird), signal_rx.resubscribe()), shutdown_tx.clone());
+                    tokio::spawn(join(Arc::clone(&songbird), signal_rx.resubscribe()))
+                        .await
+                        .context("join task failed unexpectedly")?
+                        .context("failed to join channel")?;
                 }
+
             }
         }
     }
