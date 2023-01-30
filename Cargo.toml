@@ -14,7 +14,7 @@ ringbuf = "0.3.2"
 songbird = { version = "0.3.0", default-features = false, features = ["twilight-rustls", "driver", "zlib-stock"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 twilight-gateway = "0.12"
 twilight-http = "0.12"
 twilight-model = "0.12"
