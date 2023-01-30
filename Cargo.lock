@@ -456,7 +456,6 @@ dependencies = [
  "tracing-subscriber",
  "twilight-gateway",
  "twilight-http",
- "twilight-model",
 ]
 
 [[package]]

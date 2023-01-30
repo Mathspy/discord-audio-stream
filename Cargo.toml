@@ -17,4 +17,3 @@ tracing-subscriber = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 twilight-gateway = "0.12"
 twilight-http = "0.12"
-twilight-model = "0.12"

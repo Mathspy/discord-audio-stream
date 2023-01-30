@@ -1,4 +1,4 @@
-use anyhow::{Context, Error, Result};
+use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures_util::StreamExt;
 use ringbuf::{Consumer, HeapRb};
@@ -7,12 +7,9 @@ use songbird::{
     Songbird,
 };
 use std::{env, future::Future, io, sync::Arc};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use twilight_gateway::{Cluster, Event, Intents};
 use twilight_http::Client as HttpClient;
-use twilight_model::channel::Message;
-
-type State = Arc<StateRef>;
 
 const LATENCY: f32 = 500.0;
 
@@ -45,26 +42,23 @@ impl MediaSource for InputStream {
     }
 }
 
-#[derive(Debug)]
-pub struct StateRef {
-    http: HttpClient,
-    songbird: Songbird,
-}
-
-fn spawn(fut: impl Future<Output = Result<()>> + Send + 'static, shutdown: mpsc::Sender<Error>) {
+fn spawn(
+    fut: impl Future<Output = Result<()>> + Send + 'static,
+    shutdown: mpsc::Sender<Result<()>>,
+) {
     tokio::spawn(async move {
         if let Err(why) = fut.await {
-            let _ = shutdown.send(why).await;
+            let _ = shutdown.send(Err(why)).await;
         }
     });
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> Result<()> {
     // Initialize the tracing subscriber.
     tracing_subscriber::fmt::init();
 
-    let (mut events, state) = {
+    let (mut events, songbird) = {
         let token = env::var("DISCORD_TOKEN")?;
 
         let http = HttpClient::new(token.clone());
@@ -76,31 +70,57 @@ async fn main() -> Result<(), Error> {
 
         let songbird = Songbird::twilight(Arc::new(cluster), user_id);
 
-        (events, Arc::new(StateRef { http, songbird }))
+        (events, Arc::new(songbird))
     };
 
-    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(2);
+    let (signal_tx, signal_rx) = broadcast::channel::<Signal>(2);
 
-    while let Some((_, event)) = events.next().await {
-        if let Ok(error) = shutdown_rx.try_recv() {
-            return Err(error);
-        }
+    {
+        let shutdown_tx = shutdown_tx.clone();
 
-        state.songbird.process(&event).await;
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.unwrap();
 
-        if let Event::Ready(_) = event {
-            spawn(join(Arc::clone(&state)), shutdown_tx.clone());
-        }
+            let _ = shutdown_tx.send(Ok(())).await;
+        });
     }
 
-    Ok(())
+    loop {
+        tokio::select! {
+            signal = shutdown_rx.recv() => {
+                signal_tx.send(Signal::Shutdown)?;
+                songbird.leave(532298747284291584).await?;
+
+                match signal {
+                    Some(Ok(_)) => tracing::info!("Received SIGINT, shutting down..."),
+                    Some(Err(error)) => tracing::error!("Fatal error, shutting down... \n{error:?}"),
+                    None => tracing::error!("Sending end of shutdown channel unexpectedly closed"),
+                }
+
+                return Ok(());
+            }
+            Some((_, event)) = events.next() => {
+                songbird.process(&event).await;
+
+                if let Event::Ready(_) = event {
+                    spawn(join(Arc::clone(&songbird), signal_rx.resubscribe()), shutdown_tx.clone());
+                }
+            }
+        }
+    }
 }
 
-async fn join(state: State) -> Result<(), Error> {
-    let (handle, status) = state
-        .songbird
-        .join(1038578007759147041, 1038578008879005700)
-        .await;
+#[derive(Debug, Clone)]
+enum Signal {
+    Shutdown,
+}
+
+async fn join(
+    songbird: Arc<Songbird>,
+    mut signal_channel: broadcast::Receiver<Signal>,
+) -> Result<()> {
+    let (handle, status) = songbird.join(532298747284291584, 743945715683819661).await;
 
     status.context("Failed to join channel")?;
 
@@ -163,7 +183,15 @@ async fn join(state: State) -> Result<(), Error> {
         tracing::info!("Audio stream started");
 
         loop {
-            std::thread::park();
+            let signal = signal_channel.try_recv();
+            match signal {
+                Ok(Signal::Shutdown) | Err(broadcast::error::TryRecvError::Closed) => {
+                    drop(stream);
+                    break;
+                }
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Empty) => std::thread::yield_now(),
+            }
         }
     });
 
@@ -175,27 +203,6 @@ async fn join(state: State) -> Result<(), Error> {
     let mut call = handle.lock().await;
 
     call.play_only_source(input);
-
-    Ok(())
-}
-
-pub async fn leave(msg: Message, state: State) -> Result<()> {
-    tracing::debug!(
-        "leave command in channel {} by {}",
-        msg.channel_id,
-        msg.author.name
-    );
-
-    let guild_id = msg.guild_id.unwrap();
-
-    state.songbird.leave(guild_id).await?;
-
-    state
-        .http
-        .create_message(msg.channel_id)
-        .content("Left the channel")?
-        .exec()
-        .await?;
 
     Ok(())
 }
