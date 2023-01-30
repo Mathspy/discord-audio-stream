@@ -7,7 +7,7 @@ use songbird::{
     Songbird,
 };
 use std::{env, io, sync::Arc};
-use tokio::sync::broadcast;
+use tokio::{runtime::Handle, sync::watch};
 use twilight_gateway::{Cluster, Event, Intents};
 use twilight_http::Client as HttpClient;
 
@@ -62,13 +62,13 @@ async fn main() -> Result<()> {
         (events, Arc::new(songbird))
     };
 
-    let (signal_tx, signal_rx) = broadcast::channel::<Signal>(2);
+    let (signal_tx, signal_rx) = watch::channel(Signal::Start);
 
     let event_stream = events
         .then(futures_util::future::ok)
         .try_for_each_concurrent(None, |(_, event)| async {
             let songbird = Arc::clone(&songbird);
-            let signal_rx = signal_rx.resubscribe();
+            let signal_rx = signal_rx.clone();
 
             tokio::spawn(async move {
                 songbird.process(&event).await;
@@ -99,13 +99,11 @@ async fn main() -> Result<()> {
 
 #[derive(Debug, Clone)]
 enum Signal {
+    Start,
     Shutdown,
 }
 
-async fn join(
-    songbird: Arc<Songbird>,
-    mut signal_channel: broadcast::Receiver<Signal>,
-) -> Result<()> {
+async fn join(songbird: Arc<Songbird>, mut signal_channel: watch::Receiver<Signal>) -> Result<()> {
     let (handle, status) = songbird.join(532298747284291584, 743945715683819661).await;
 
     status.context("Failed to join channel")?;
@@ -165,18 +163,24 @@ async fn join(
                 None,
             )
             .expect("Failed to build input stream");
-        stream.play().expect("Failed to start input stream");
-        tracing::info!("Audio stream started");
 
         loop {
-            let signal = signal_channel.try_recv();
-            match signal {
-                Ok(Signal::Shutdown) | Err(broadcast::error::TryRecvError::Closed) => {
+            let sender_dropped = Handle::current()
+                .block_on(signal_channel.changed())
+                .is_err();
+            if sender_dropped {
+                drop(stream);
+                break;
+            }
+            match *signal_channel.borrow() {
+                Signal::Start => {
+                    stream.play().expect("Failed to start input stream");
+                    tracing::info!("Audio stream started");
+                }
+                Signal::Shutdown => {
                     drop(stream);
                     break;
                 }
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                Err(broadcast::error::TryRecvError::Empty) => std::thread::yield_now(),
             }
         }
     });
