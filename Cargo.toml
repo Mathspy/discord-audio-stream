@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.68"
 bytemuck = "1.13.0"
+clap = { version = "4.1.4", features = ["derive"] }
 cpal = "0.15.0"
 futures-util = { version = "0.3.25", default-features = false }
 ringbuf = "0.3.2"

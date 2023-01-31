@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures_util::{StreamExt, TryStreamExt};
 use ringbuf::{Consumer, HeapRb};
@@ -11,7 +12,24 @@ use tokio::{runtime::Handle, sync::watch};
 use twilight_gateway::{Cluster, Event, Intents};
 use twilight_http::Client as HttpClient;
 
-const LATENCY: f32 = 500.0;
+/// Discord bot to stream an input device from your computer right into a Discord channel
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Args {
+    /// id of the server containing the channel to join
+    guild_id: u64,
+
+    /// id of the channel to join
+    channel_id: u64,
+
+    /// the name of the input_device to stream from
+    #[arg(short, long)]
+    input_device: Option<String>,
+
+    /// the latency of the audio stream in milliseconds
+    #[arg(short, long, default_value_t = 500.0)]
+    latency: f32,
+}
 
 struct InputStream {
     buffer: Consumer<u8, Arc<HeapRb<u8>>>,
@@ -47,6 +65,8 @@ async fn main() -> Result<()> {
     // Initialize the tracing subscriber.
     tracing_subscriber::fmt::init();
 
+    let args = Args::parse();
+
     let (events, songbird) = {
         let token = env::var("DISCORD_TOKEN")?;
 
@@ -62,19 +82,21 @@ async fn main() -> Result<()> {
         (events, Arc::new(songbird))
     };
 
+    let config = Arc::new(args);
     let (signal_tx, signal_rx) = watch::channel(Signal::Start);
 
     let event_stream = events
         .then(futures_util::future::ok)
         .try_for_each_concurrent(None, |(_, event)| async {
             let songbird = Arc::clone(&songbird);
+            let config = Arc::clone(&config);
             let signal_rx = signal_rx.clone();
 
             tokio::spawn(async move {
                 songbird.process(&event).await;
 
                 if let Event::Ready(_) = event {
-                    join(songbird, signal_rx)
+                    join(songbird, config, signal_rx)
                         .await
                         .context("failed to join channel")?;
                 }
@@ -87,7 +109,7 @@ async fn main() -> Result<()> {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             signal_tx.send(Signal::Shutdown)?;
-            songbird.leave(532298747284291584).await?;
+            songbird.leave(config.guild_id).await?;
 
             return Ok(());
         }
@@ -103,34 +125,61 @@ enum Signal {
     Shutdown,
 }
 
-async fn join(songbird: Arc<Songbird>, mut signal_channel: watch::Receiver<Signal>) -> Result<()> {
-    let (handle, status) = songbird.join(532298747284291584, 743945715683819661).await;
+async fn join(
+    songbird: Arc<Songbird>,
+    config: Arc<Args>,
+    mut signal_channel: watch::Receiver<Signal>,
+) -> Result<()> {
+    let (handle, status) = songbird.join(config.guild_id, config.channel_id).await;
 
     status.context("Failed to join channel")?;
 
     tracing::info!("Successfully connected to discord channel");
     tracing::info!("Creating audio stream");
 
+    tracing::info!("Inspecting input device...");
+
     let host = cpal::default_host();
-    let default_input_device = host
-        .input_devices()?
-        .find(|device| {
-            device
-                .name()
-                .map(|name| name == "Game Capture HD60 X")
-                .unwrap_or(false)
-        })
-        .expect("game capture input device exists");
-    tracing::info!(
-        "Using default input device {:?}",
-        default_input_device.name()
-    );
-    let default_config = default_input_device
+    let input_device = if let Some(input_device) = &config.input_device {
+        host.input_devices()?
+            .find(|device| {
+                device
+                    .name()
+                    .map(|name| &name == input_device)
+                    .unwrap_or(false)
+            })
+            .with_context(|| {
+                let input_devices = host
+                    .input_devices()
+                    .expect("method just succeeded earlier")
+                    .flat_map(|device| device.name())
+                    .reduce(|mut acc, name| {
+                        acc.push_str(", ");
+                        acc.push_str(&name);
+
+                        acc
+                    });
+                if let Some(input_devices) = input_devices {
+                    format!(
+                        "Unknown input device, please choose one from the available input devices: {}",
+                        input_devices
+                    )
+                } else {
+                    format!("Found no input devices, please make sure your micrphone or game capture is connected")
+                }
+            })?
+    } else {
+        host.default_input_device().context(
+            "No default input device exists and no input device provided via --input-device flag",
+        )?
+    };
+    tracing::info!("Using input device {:?}", input_device.name());
+    let default_config = input_device
         .default_input_config()
         .expect("a default input configuration")
         .config();
 
-    let latency_frames = (LATENCY / 1_000.0) * default_config.sample_rate.0 as f32;
+    let latency_frames = (config.latency / 1_000.0) * default_config.sample_rate.0 as f32;
     let latency_samples = latency_frames as usize * default_config.channels as usize * 4;
     let (mut producer, consumer) = HeapRb::<u8>::new(latency_samples * 2).split();
 
@@ -148,7 +197,7 @@ async fn join(songbird: Arc<Songbird>, mut signal_channel: watch::Receiver<Signa
     };
 
     tokio::task::spawn_blocking(move || {
-        let stream = default_input_device
+        let stream = input_device
             .build_input_stream(
                 &default_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -192,6 +241,7 @@ async fn join(songbird: Arc<Songbird>, mut signal_channel: watch::Receiver<Signa
 
     let mut call = handle.lock().await;
 
+    tracing::info!("Playing audio for the masses!");
     call.play_only_source(input);
 
     Ok(())
