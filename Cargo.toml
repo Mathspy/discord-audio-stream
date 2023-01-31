@@ -2,6 +2,9 @@
 name = "discord-audio-stream"
 version = "0.1.0"
 edition = "2021"
+description = "Stream any input device from your computer right to a Discord bot"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Mathspy/discord-audio-stream"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
