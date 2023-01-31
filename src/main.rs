@@ -130,13 +130,6 @@ async fn join(
     config: Arc<Args>,
     mut signal_channel: watch::Receiver<Signal>,
 ) -> Result<()> {
-    let (handle, status) = songbird.join(config.guild_id, config.channel_id).await;
-
-    status.context("Failed to join channel")?;
-
-    tracing::info!("Successfully connected to discord channel");
-    tracing::info!("Creating audio stream");
-
     tracing::info!("Inspecting input device...");
 
     let host = cpal::default_host();
@@ -195,6 +188,13 @@ async fn join(
         2 => true,
         channels => anyhow::bail!("Input device has an unsupported number of channels: {channels}"),
     };
+
+    let (handle, status) = songbird.join(config.guild_id, config.channel_id).await;
+
+    status.context("Failed to join channel")?;
+
+    tracing::info!("Successfully connected to discord channel");
+    tracing::info!("Creating audio stream");
 
     tokio::task::spawn_blocking(move || {
         let stream = input_device
